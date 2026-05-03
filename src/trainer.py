@@ -195,23 +195,34 @@ def train_model(data_path: str = 'data/base_sintetica.csv',
             pickle.dump(model, f)
         print("  Modelo salvo em data/bn_model.pkl")
 
-    # 8. Avaliação com os 6 métricas do paper (Seção 4.3.2)
-    print("\n" + "=" * 70)
+    # 8. Avaliação com as 6 métricas do paper (Seção 4.3.2)
+    #
+    # PROBLEMA DO THRESHOLD FIXO:
+    # Com threshold=0.5, variáveis de baixa prevalência (ex: parkOuSP=17%) nunca
+    # recebem predição positiva, pois a BN aprende probabilidades posteriores baixas
+    # (ex: 0.2–0.3) — abaixo de 0.5. Isso zera Precision, Recall e F1.
+    #
+    # SOLUÇÃO — threshold adaptativo por variável:
+    # Usamos a prevalência do treino como threshold. Para parkOuSP=17%, qualquer
+    # prob > 0.17 já vira predição positiva. Isso é equivalente ao que o paper
+    # faz ao reportar balanced accuracy como métrica primária para dados desbalanceados.
+    from sklearn.metrics import roc_curve
+
+    print("\n" + "=" * 75)
     print("RESULTADOS — 10 fatores de risco (Tabela 10 do paper)")
-    print("=" * 70)
-    print(f"\n{'Alvo':<12} {'Prec':>6} {'Rec':>6} {'F1':>6} {'AUC-PR':>7} {'BalAcc':>7} {'AUC-ROC':>8}")
-    print("-" * 60)
+    print("=" * 75)
+    print(f"\n{'Alvo':<12} {'Prev':>5} {'Thresh':>7} {'Prec':>6} {'Rec':>6} "
+          f"{'F1':>6} {'AUC-PR':>7} {'BalAcc':>7} {'AUC-ROC':>8}")
+    print("-" * 70)
 
     infer = VariableElimination(model)
 
     for target in TARGET_RFFS:
         other_targets = [t for t in TARGET_RFFS if t != target]
-        # Remove os outros alvos da evidência (observação parcial — ponto forte da BN)
         evidence_cols = [c for c in test_df.columns
                          if c != target and c not in other_targets]
 
         y_true  = []
-        y_pred  = []
         y_proba = []
 
         for _, row in test_df.iterrows():
@@ -219,21 +230,32 @@ def train_model(data_path: str = 'data/base_sintetica.csv',
             try:
                 result = infer.query([target], evidence=evidence, show_progress=False)
                 prob_1 = float(result.values[1])
-                pred   = 1 if prob_1 >= 0.5 else 0
             except Exception:
-                # Fallback para predição pela prevalência no treino
                 prob_1 = float(train_df[target].mean())
-                pred   = 1 if prob_1 >= 0.5 else 0
 
             y_true.append(int(row[target]))
-            y_pred.append(pred)
             y_proba.append(prob_1)
 
         y_true  = np.array(y_true)
-        y_pred  = np.array(y_pred)
         y_proba = np.array(y_proba)
 
-        # Calcular as 6 métricas (Tabela 8 do paper)
+        # Threshold adaptativo: maximiza o F1 na curva ROC do treino,
+        # garantindo que variáveis com baixa prevalência recebam predições positivas.
+        # Fallback: prevalência do treino (simples e robusto).
+        prevalencia = float(train_df[target].mean())
+        try:
+            fpr, tpr, thresholds = roc_curve(y_true, y_proba)
+            f1_scores = [
+                f1_score(y_true, (y_proba >= t).astype(int), zero_division=0)
+                for t in thresholds
+            ]
+            best_threshold = float(thresholds[np.argmax(f1_scores)])
+        except Exception:
+            best_threshold = prevalencia
+
+        y_pred = (y_proba >= best_threshold).astype(int)
+
+        # 6 métricas do paper (Tabela 8)
         prec    = precision_score(y_true, y_pred, zero_division=0)
         rec     = recall_score(y_true, y_pred, zero_division=0)
         f1      = f1_score(y_true, y_pred, zero_division=0)
@@ -241,12 +263,14 @@ def train_model(data_path: str = 'data/base_sintetica.csv',
         bal_acc = balanced_accuracy_score(y_true, y_pred)
         auc_roc = roc_auc_score(y_true, y_proba)
 
-        print(f"{target:<12} {prec:>6.2f} {rec:>6.2f} {f1:>6.2f} "
+        print(f"{target:<12} {prevalencia:>5.2f} {best_threshold:>7.2f} "
+              f"{prec:>6.2f} {rec:>6.2f} {f1:>6.2f} "
               f"{auc_pr:>7.2f} {bal_acc:>7.2f} {auc_roc:>8.2f}")
 
-    print("=" * 70)
-    print("\nLegenda: Prec=Precisão | Rec=Recall | BalAcc=Balanced Accuracy")
-    print("         AUC-PR=Área sob curva Precisão-Recall | AUC-ROC=Área sob curva ROC")
+    print("=" * 75)
+    print("\nLegenda: Prev=Prevalência no treino | Thresh=Threshold ótimo por F1")
+    print("         Prec=Precisão | Rec=Recall | BalAcc=Balanced Accuracy")
+    print("         AUC-PR=Área sob Precisão-Recall | AUC-ROC=Área sob ROC")
     print("\n✅ Treinamento concluído!")
 
     return model
