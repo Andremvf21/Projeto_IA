@@ -9,6 +9,9 @@ Implementa o framework completo do paper (Seções 4 e 5):
   3. Parâmetros: estimação Bayesiana (BDeu)
   4. Avaliação: 6 métricas para cada um dos 10 fatores de risco
 """
+import matplotlib.pyplot as plt
+import networkx as nx
+
 
 import pickle
 import warnings
@@ -273,8 +276,36 @@ def train_model(data_path: str = 'data/base_sintetica.csv',
     print("         AUC-PR=Área sob Precisão-Recall | AUC-ROC=Área sob ROC")
     print("\n✅ Treinamento concluído!")
 
+
     return model
 
 
+def plot_bn_structure(model):
+    """
+    Gera uma visualização gráfica da estrutura da Rede Bayesiana.
+    """
+    plt.figure(figsize=(12, 8))
+    
+    # Criar o objeto do grafo a partir das arestas do modelo
+    G = nx.DiGraph(model.edges())
+    
+    # Definir o layout (o 'spring_layout' costuma organizar bem os nós)
+    pos = nx.spring_layout(G, seed=42, k=2)
+    
+    # Desenhar nós e arestas
+    nx.draw_networkx_nodes(G, pos, node_size=2000, node_color='skyblue', alpha=0.8)
+    nx.draw_networkx_labels(G, pos, font_size=10, font_weight='bold')
+    nx.draw_networkx_edges(G, pos, edge_color='gray', arrows=True, arrowsize=20)
+    
+    plt.title("Estrutura da Rede Bayesiana Aprendida (Sihag et al. Framework)")
+    plt.axis('off')
+    plt.tight_layout()
+    plt.show()
+
+
+
 if __name__ == "__main__":
-    train_model()
+    model = train_model()
+    plot_bn_structure(model)
+
+    
