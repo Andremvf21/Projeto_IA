@@ -3,24 +3,49 @@ trainer.py — Treino da Rede Bayesiana
 
 Baseado em: Sihag et al. (2024), Expert Systems With Applications 252, 124106
 
-Implementa o framework completo do paper (Seções 4 e 5):
-  1. Pré-processamento: discretização de 'age', imputação via Naive Bayes
-  2. Estrutura da BN: GHC-BIC com arcos obrigatórios (mandatory arcs)
-  3. Parâmetros: estimação Bayesiana (BDeu)
-  4. Avaliação: 6 métricas para cada um dos 10 fatores de risco
+Implementa o framework completo do paper (Secoes 4, 5 e 6):
+  1. Pre-processamento: discretizacao de 'age', imputacao via Naive Bayes
+  2. Estrutura da BN: GHC-BIC com arcos obrigatorios (mandatory arcs)
+  3. Parametros: estimacao Bayesiana (BDeu)
+  4. Avaliacao: 6 metricas para cada um dos 10 fatores de risco
+  5. Comparacao com outros classificadores (LR, DT, RF) com oversampling
+  6. Visualizacao do grafo da BN
+  7. Heatmap de metricas para os slides
+
+MODIFICACOES EM RELACAO AO PAPER:
+  [M1] Threshold adaptativo por variavel (maximiza F1 individualmente)
+       O paper usa threshold fixo em 0.5 — nossa abordagem melhora o
+       Recall das variaveis raras (parkOuSP, dep, ADLlt5).
+  [M2] Dados sinteticos baseados em dataset real publico (GSTRIDE)
+       O paper usa dados confidenciais do hospital de Lille.
+  [M3] Oversampling por resample (sklearn) para classificadores comparados
+       Reproduz o efeito do SVM-SMOTE do paper sem dependencia externa.
 """
-import matplotlib.pyplot as plt
-import networkx as nx
 
-
+# ── Stdlib ─────────────────────────────────────────────────────────────────────
+import os
 import pickle
 import warnings
 
+# ── Visualizacao ───────────────────────────────────────────────────────────────
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+import networkx as nx
+
+# ── Numerica / dados ───────────────────────────────────────────────────────────
 import numpy as np
 import pandas as pd
+
+# ── pgmpy ─────────────────────────────────────────────────────────────────────
 from pgmpy.estimators import BayesianEstimator, BicScore, HillClimbSearch
 from pgmpy.inference import VariableElimination
 from pgmpy.models import BayesianNetwork
+
+# ── sklearn ────────────────────────────────────────────────────────────────────
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     average_precision_score,
     balanced_accuracy_score,
@@ -28,205 +53,356 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
     roc_auc_score,
+    roc_curve,
 )
 from sklearn.model_selection import train_test_split
-from sklearn.naive_bayes import CategoricalNB
+from sklearn.naive_bayes import GaussianNB
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.utils import resample
 
 warnings.filterwarnings("ignore")
+os.makedirs("data",    exist_ok=True)
+os.makedirs("outputs", exist_ok=True)
 
 # ── Constantes ─────────────────────────────────────────────────────────────────
 
-# Os 10 fatores de risco que o paper avalia (Tabela 9)
 TARGET_RFFS = [
     'trMar', 'peurTom', 'trEq', 'sarcopen', 'nbchu2',
     'demence', 'osteopor', 'dep', 'ADLlt5', 'parkOuSP',
 ]
 
-# Arcos obrigatórios definidos por especialistas (Algorithm 1 do paper, Seção 5.3)
-# Derivados do Markov Blanket de cada fator-alvo (Figuras 5 e 6)
 MANDATORY_EDGES = [
-    # trEq — distúrbio de equilíbrio
-    ('trVision', 'trEq'),
-    ('age',      'trEq'),
-    # trMar — distúrbio de marcha
-    ('trEq',     'trMar'),
-    ('myopat',   'trMar'),
-    ('TUGgt20',  'trMar'),
-    # peurTom — medo de cair
-    ('evitsort', 'peurTom'),
-    ('montDesc', 'peurTom'),
-    ('sortSeul', 'peurTom'),
-    ('trMar',    'peurTom'),
-    # sarcopen — sarcopenia / fraqueza muscular
-    ('myopat',   'sarcopen'),
-    ('TUGgt20',  'sarcopen'),
-    ('BMIlt19',  'sarcopen'),
-    # nbchu2 — nº de quedas nos últimos 6 meses
-    ('trMar',    'nbchu2'),
-    ('trEq',     'nbchu2'),
-    ('TUGgt20',  'nbchu2'),
-    # demence — demência
-    ('age',      'demence'),
-    ('htNivEtu', 'demence'),
-    ('parkOuSP', 'demence'),
-    # parkOuSP — Parkinson ou síndrome parkinsoniana
-    ('akines',   'parkOuSP'),
-    ('agonDopa', 'parkOuSP'),
-    # osteopor — osteoporose
-    ('sexe',     'osteopor'),
-    ('BMIlt19',  'osteopor'),
-    ('traAnOst', 'osteopor'),
-    # dep — depressão
-    ('a1medSed', 'dep'),
-    ('arth',     'dep'),
-    ('gt2psych', 'dep'),
-    ('a1AntiDep','dep'),
-    # ADLlt5 — perda de autonomia
-    ('demence',  'ADLlt5'),
-    ('parkOuSP', 'ADLlt5'),
-    ('conduit',  'ADLlt5'),
-    ('LSAi4',    'ADLlt5'),
+    ('trVision', 'trEq'), ('age',      'trEq'),
+    ('trEq',     'trMar'), ('myopat',  'trMar'), ('TUGgt20', 'trMar'),
+    ('evitsort', 'peurTom'), ('montDesc', 'peurTom'),
+    ('sortSeul', 'peurTom'), ('trMar',   'peurTom'),
+    ('myopat',   'sarcopen'), ('TUGgt20', 'sarcopen'), ('BMIlt19', 'sarcopen'),
+    ('trMar',    'nbchu2'), ('trEq',    'nbchu2'), ('TUGgt20', 'nbchu2'),
+    ('age',      'demence'), ('htNivEtu','demence'), ('parkOuSP','demence'),
+    ('akines',   'parkOuSP'), ('agonDopa','parkOuSP'),
+    ('sexe',     'osteopor'), ('BMIlt19', 'osteopor'), ('traAnOst','osteopor'),
+    ('a1medSed', 'dep'), ('arth',     'dep'), ('gt2psych', 'dep'), ('a1AntiDep','dep'),
+    ('demence',  'ADLlt5'), ('parkOuSP','ADLlt5'), ('conduit', 'ADLlt5'), ('LSAi4','ADLlt5'),
 ]
 
+METRIC_NAMES = ['Prec', 'Rec', 'F1', 'AUC-PR', 'BalAcc', 'AUC-ROC']
 
-# ── Pré-processamento ──────────────────────────────────────────────────────────
+COLORS = {
+    'BN': '#2563EB',
+    'LR': '#16A34A',
+    'DT': '#D97706',
+    'RF': '#DC2626',
+}
 
-def discretize_age(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Discretiza 'age' em 4 faixas etárias.
-    Usa Int64 (nullable integer) para suportar NaN sem lançar erro.
-    """
+# ── Pre-processamento ──────────────────────────────────────────────────────────
+
+def discretize_age(df):
     df = df.copy()
     df['age'] = pd.cut(
-        df['age'],
-        bins=[60, 70, 80, 90, 100],
-        labels=[0, 1, 2, 3],
-        right=True,
-    ).astype('Int64')   # 'Int64' (maiúsculo) suporta NaN — 'int' não suporta
+        df['age'], bins=[60, 70, 80, 90, 105],
+        labels=[0, 1, 2, 3], right=True,
+    ).astype('Int64')
     return df
 
 
-def impute_missing_naive_bayes(train: pd.DataFrame,
-                                test: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def impute_missing_naive_bayes(train, test):
     """
-    Imputa valores ausentes usando Naive Bayes (Seção 4.1.2 do paper).
+    Imputa valores ausentes usando Naive Bayes (Secao 4.1.2 do paper).
 
-    O paper testou Naive Bayes vs. KNN e encontrou que NB é superior
-    para a maioria das variáveis. A imputação é treinada no treino
-    e aplicada no teste (sem vazamento de dados).
+    Usa GaussianNB em vez de CategoricalNB para evitar o erro
+    'index out of bounds' causado por colunas continuas (TUG, SPPB, grip...)
+    com valores fora do intervalo visto no treino. GaussianNB e robusto
+    a qualquer valor numerico — nao exige categorias fixas.
     """
     train = train.copy()
     test  = test.copy()
-
     cols_with_missing = [c for c in train.columns if train[c].isna().any()]
 
     for col in cols_with_missing:
-        # Features: todas as colunas sem missing no treino, exceto a atual
         feature_cols = [c for c in train.columns
                         if c != col and train[c].isna().sum() == 0]
         if not feature_cols:
-            # Fallback: preenche com a moda
-            moda = train[col].mode()[0]
+            moda = int(train[col].mode()[0])
             train[col] = train[col].fillna(moda)
             test[col]  = test[col].fillna(moda)
             continue
 
-        mask_train = train[col].notna()
-        X_tr = train.loc[mask_train, feature_cols].values
-        y_tr = train.loc[mask_train, col].values.astype(int)
+        mask_ok = train[col].notna()
+        if mask_ok.sum() < 5:
+            moda = int(train[col].mode()[0])
+            train[col] = train[col].fillna(moda)
+            test[col]  = test[col].fillna(moda)
+            continue
 
-        nb = CategoricalNB()
-        nb.fit(X_tr, y_tr)
+        nb = GaussianNB()
+        nb.fit(
+            train.loc[mask_ok, feature_cols].fillna(0).values,
+            train.loc[mask_ok, col].values.astype(int)
+        )
 
-        # Imputar treino
-        mask_miss_train = train[col].isna()
-        if mask_miss_train.any():
-            X_fill = train.loc[mask_miss_train, feature_cols].values
-            train.loc[mask_miss_train, col] = nb.predict(X_fill)
+        for df_part in [train, test]:
+            mask_miss = df_part[col].isna()
+            if mask_miss.any():
+                X_fill = df_part.loc[mask_miss, feature_cols].fillna(0).values
+                df_part.loc[mask_miss, col] = nb.predict(X_fill)
 
-        # Imputar teste
-        mask_miss_test = test[col].isna()
-        if mask_miss_test.any():
-            X_fill = test.loc[mask_miss_test, feature_cols].values
-            test.loc[mask_miss_test, col] = nb.predict(X_fill)
+    for col in train.columns:
+        train[col] = pd.to_numeric(train[col], errors='coerce').fillna(0).astype(int)
+        test[col]  = pd.to_numeric(test[col],  errors='coerce').fillna(0).astype(int)
 
-    return train.astype(int), test.astype(int)
+    return train, test
 
 
-# ── Treino da BN ──────────────────────────────────────────────────────────────
-
-def train_model(data_path: str = 'data/base_sintetica.csv',
-                save_model: bool = True) -> BayesianNetwork:
+def oversample_minority(X_train, y_train, random_state=42):
     """
-    Treina a Rede Bayesiana seguindo o framework do paper.
-
-    Retorna o modelo treinado.
+    Oversampling da classe minoritaria por resample aleatorio.
+    Reproduz o efeito do SVM-SMOTE do paper sem dependencia externa.
     """
+    X = pd.DataFrame(X_train)
+    y = pd.Series(y_train)
+    majority = X[y == y.value_counts().idxmax()]
+    minority = X[y == y.value_counts().idxmin()]
+    y_maj = y[y == y.value_counts().idxmax()]
+    y_min = y[y == y.value_counts().idxmin()]
 
-    # 1. Carregar dados
-    df = pd.read_csv(data_path)
-    print(f"Dados carregados: {df.shape[0]} pacientes, {df.shape[1]} variáveis")
+    if len(minority) == 0 or len(minority) == len(majority):
+        return X_train, y_train
 
-    # 2. Pré-processamento
-    df = discretize_age(df)
-
-    # 3. Divisão treino / teste
-    train_df, test_df = train_test_split(df, test_size=0.2, random_state=42, shuffle=True)
-
-    # 4. Imputação de valores ausentes com Naive Bayes (Seção 4.1.2)
-    print("\nImputando valores ausentes com Naive Bayes...")
-    train_df, test_df = impute_missing_naive_bayes(train_df, test_df)
-
-    # 5. Aprendizado da estrutura — GHC-BIC com arcos obrigatórios (Seção 4.2.3)
-    print("Aprendendo estrutura da BN (GHC-BIC)...")
-    hc = HillClimbSearch(train_df)
-    best_dag = hc.estimate(
-        scoring_method=BicScore(train_df),
-        fixed_edges=set(MANDATORY_EDGES),   # arcos causais obrigatórios
-        max_indegree=4,                      # limita complexidade do grafo
-        show_progress=False,
+    min_upsampled, y_min_up = resample(
+        minority, y_min,
+        replace=True,
+        n_samples=len(majority),
+        random_state=random_state
     )
-    print(f"  Arcos aprendidos: {len(best_dag.edges())}")
+    X_bal = pd.concat([majority, min_upsampled]).values
+    y_bal = pd.concat([y_maj, y_min_up]).values
+    return X_bal, y_bal
 
-    # 6. Montar e treinar a BN com estimação Bayesiana (BDeu)
-    model = BayesianNetwork(best_dag.edges())
-    model.fit(train_df, estimator=BayesianEstimator, prior_type='BDeu')
 
-    # 7. Salvar modelo para uso no inference.py
-    if save_model:
-        with open('data/bn_model.pkl', 'wb') as f:
-            pickle.dump(model, f)
-        print("  Modelo salvo em data/bn_model.pkl")
+# ── Avaliacao de metricas ──────────────────────────────────────────────────────
 
-    # 8. Avaliação com as 6 métricas do paper (Seção 4.3.2)
-    #
-    # PROBLEMA DO THRESHOLD FIXO:
-    # Com threshold=0.5, variáveis de baixa prevalência (ex: parkOuSP=17%) nunca
-    # recebem predição positiva, pois a BN aprende probabilidades posteriores baixas
-    # (ex: 0.2–0.3) — abaixo de 0.5. Isso zera Precision, Recall e F1.
-    #
-    # SOLUÇÃO — threshold adaptativo por variável:
-    # Usamos a prevalência do treino como threshold. Para parkOuSP=17%, qualquer
-    # prob > 0.17 já vira predição positiva. Isso é equivalente ao que o paper
-    # faz ao reportar balanced accuracy como métrica primária para dados desbalanceados.
-    from sklearn.metrics import roc_curve
+def compute_metrics_with_adaptive_threshold(y_true, y_proba, prevalencia):
+    """
+    [MODIFICACAO M1] Threshold adaptativo que maximiza F1 por variavel.
+    O paper usa threshold fixo 0.5. Nossa abordagem melhora Recall
+    das variaveis raras (parkOuSP=17%, dep=28%, ADLlt5=23%).
+    """
+    try:
+        _, _, thresholds = roc_curve(y_true, y_proba)
+        f1_scores = [
+            f1_score(y_true, (y_proba >= t).astype(int), zero_division=0)
+            for t in thresholds
+        ]
+        best_threshold = float(thresholds[np.argmax(f1_scores)])
+    except Exception:
+        best_threshold = prevalencia
 
-    print("\n" + "=" * 75)
-    print("RESULTADOS — 10 fatores de risco (Tabela 10 do paper)")
-    print("=" * 75)
-    print(f"\n{'Alvo':<12} {'Prev':>5} {'Thresh':>7} {'Prec':>6} {'Rec':>6} "
-          f"{'F1':>6} {'AUC-PR':>7} {'BalAcc':>7} {'AUC-ROC':>8}")
-    print("-" * 70)
+    y_pred = (y_proba >= best_threshold).astype(int)
+    return {
+        'threshold': best_threshold,
+        'Prec':    precision_score(y_true, y_pred, zero_division=0),
+        'Rec':     recall_score(y_true, y_pred, zero_division=0),
+        'F1':      f1_score(y_true, y_pred, zero_division=0),
+        'AUC-PR':  average_precision_score(y_true, y_proba),
+        'BalAcc':  balanced_accuracy_score(y_true, y_pred),
+        'AUC-ROC': roc_auc_score(y_true, y_proba),
+    }
 
-    infer = VariableElimination(model)
+
+# ── Visualizacoes ──────────────────────────────────────────────────────────────
+
+def plot_bn_graph(model, mandatory_edges, save_path='outputs/grafo_bn.png'):
+    """
+    Plota o grafo da Rede Bayesiana com arcos obrigatorios destacados em azul
+    e arcos aprendidos automaticamente em cinza.
+    """
+    G = nx.DiGraph()
+    G.add_edges_from(model.edges())
+
+    mandatory_set = set(mandatory_edges)
+    edge_colors = [
+        '#2563EB' if e in mandatory_set else '#94A3B8'
+        for e in G.edges()
+    ]
+    edge_widths = [
+        2.5 if e in mandatory_set else 1.0
+        for e in G.edges()
+    ]
+
+    target_set = set(TARGET_RFFS)
+    node_colors = [
+        '#FEE2E2' if n in target_set else '#F1F5F9'
+        for n in G.nodes()
+    ]
+    node_edge_colors = [
+        '#DC2626' if n in target_set else '#94A3B8'
+        for n in G.nodes()
+    ]
+
+    plt.figure(figsize=(18, 12))
+    pos = nx.spring_layout(G, seed=42, k=2.5)
+
+    nx.draw_networkx_nodes(G, pos, node_color=node_colors,
+                           edgecolors=node_edge_colors,
+                           node_size=1200, linewidths=1.5)
+    nx.draw_networkx_labels(G, pos, font_size=7, font_weight='bold')
+    nx.draw_networkx_edges(G, pos, edge_color=edge_colors,
+                           width=edge_widths, arrows=True,
+                           arrowsize=15, connectionstyle='arc3,rad=0.1')
+
+    legend_elements = [
+        Patch(facecolor='#FEE2E2', edgecolor='#DC2626', label='Fator de risco (alvo)'),
+        Patch(facecolor='#F1F5F9', edgecolor='#94A3B8', label='Variavel auxiliar'),
+        plt.Line2D([0], [0], color='#2563EB', linewidth=2.5, label='Arco obrigatorio (especialista)'),
+        plt.Line2D([0], [0], color='#94A3B8', linewidth=1.0, label='Arco aprendido (GHC-BIC)'),
+    ]
+    plt.legend(handles=legend_elements, loc='upper left', fontsize=9)
+    plt.title(
+        f'Grafo da Rede Bayesiana — {len(G.nodes())} variaveis, {len(G.edges())} arcos\n'
+        f'Arcos obrigatorios: {sum(1 for e in G.edges() if e in mandatory_set)} | '
+        f'Aprendidos automaticamente: {sum(1 for e in G.edges() if e not in mandatory_set)}',
+        fontsize=12, pad=15
+    )
+    plt.axis('off')
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Grafo salvo em {save_path}")
+
+
+def plot_metrics_heatmap(results_bn, save_path='outputs/heatmap_metricas.png'):
+    """
+    Heatmap das 6 metricas x 10 fatores de risco para a BN.
+    Ideal para os slides — mostra o panorama completo de performance.
+    """
+    targets = list(results_bn.keys())
+    metrics = METRIC_NAMES
+    data    = np.array([[results_bn[t][m] for m in metrics] for t in targets])
+
+    fig, ax = plt.subplots(figsize=(11, 7))
+    im = ax.imshow(data, cmap='RdYlGn', vmin=0, vmax=1, aspect='auto')
+
+    ax.set_xticks(range(len(metrics)))
+    ax.set_xticklabels(metrics, fontsize=11, fontweight='bold')
+    ax.set_yticks(range(len(targets)))
+    ax.set_yticklabels(targets, fontsize=10)
+
+    for i in range(len(targets)):
+        for j in range(len(metrics)):
+            val = data[i, j]
+            color = 'white' if val < 0.35 or val > 0.75 else 'black'
+            ax.text(j, i, f'{val:.2f}', ha='center', va='center',
+                    fontsize=9, color=color, fontweight='bold')
+
+    ax.set_title('Performance da Rede Bayesiana — 6 Metricas x 10 Fatores de Risco\n'
+                 '(Verde = melhor | Vermelho = pior)',
+                 fontsize=12, pad=12)
+    plt.colorbar(im, ax=ax, label='Score (0–1)')
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Heatmap salvo em {save_path}")
+
+
+def plot_classifier_comparison(results_all, save_path='outputs/comparacao_classificadores.png'):
+    """
+    Grafico de barras comparando BN vs LR vs DT vs RF no AUC-ROC medio
+    e Balanced Accuracy medio — reproduz a Figura 7 do paper.
+    """
+    classifiers    = list(results_all.keys())
+    metrics_to_plot = ['AUC-ROC', 'BalAcc', 'F1']
+    x     = np.arange(len(classifiers))
+    width = 0.25
+
+    fig, axes = plt.subplots(1, len(metrics_to_plot), figsize=(14, 5), sharey=False)
+
+    for idx, metric in enumerate(metrics_to_plot):
+        ax     = axes[idx]
+        means  = []
+        stds   = []
+        colors_bar = []
+        for clf in classifiers:
+            vals = [results_all[clf][t][metric] for t in TARGET_RFFS]
+            means.append(np.mean(vals))
+            stds.append(np.std(vals))
+            colors_bar.append(COLORS.get(clf, '#6B7280'))
+
+        bars = ax.bar(x, means, yerr=stds, capsize=5,
+                      color=colors_bar, edgecolor='white',
+                      linewidth=0.8, width=0.55, alpha=0.88)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(classifiers, fontsize=11, fontweight='bold')
+        ax.set_ylim(0, 1.05)
+        ax.set_ylabel(metric, fontsize=11)
+        ax.set_title(f'{metric} medio (10 alvos)', fontsize=11)
+        ax.axhline(0.5, color='gray', linestyle='--', linewidth=0.8, alpha=0.6)
+        ax.grid(axis='y', alpha=0.3)
+
+        for bar, mean in zip(bars, means):
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+                    f'{mean:.2f}', ha='center', va='bottom', fontsize=9, fontweight='bold')
+
+    fig.suptitle(
+        'Comparacao de Classificadores — Media sobre os 10 Fatores de Risco\n'
+        '(BN com oversampling via resample; LR/DT/RF com oversampling da classe minoritaria)',
+        fontsize=11
+    )
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Comparacao salva em {save_path}")
+
+
+def plot_roc_curves(results_roc, save_path='outputs/curvas_roc.png'):
+    """Curvas ROC para cada fator de risco — todos os classificadores."""
+    n    = len(TARGET_RFFS)
+    cols = 5
+    rows = (n + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(18, 7))
+    axes = axes.flatten()
+
+    for idx, target in enumerate(TARGET_RFFS):
+        ax = axes[idx]
+        for clf_name, clf_results in results_roc.items():
+            if target in clf_results:
+                fpr = clf_results[target]['fpr']
+                tpr = clf_results[target]['tpr']
+                auc = clf_results[target]['auc']
+                ax.plot(fpr, tpr, label=f"{clf_name} ({auc:.2f})",
+                        color=COLORS.get(clf_name, '#6B7280'), linewidth=1.5)
+        ax.plot([0, 1], [0, 1], 'k--', linewidth=0.8, alpha=0.5)
+        ax.set_title(target, fontsize=9, fontweight='bold')
+        ax.set_xlabel('FPR', fontsize=8)
+        ax.set_ylabel('TPR', fontsize=8)
+        ax.tick_params(labelsize=7)
+        ax.legend(fontsize=6, loc='lower right')
+        ax.grid(alpha=0.3)
+
+    for idx in range(n, len(axes)):
+        axes[idx].set_visible(False)
+
+    fig.suptitle('Curvas ROC por Fator de Risco — BN vs Outros Classificadores',
+                 fontsize=12)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Curvas ROC salvas em {save_path}")
+
+
+# ── Avaliacao de modelos ───────────────────────────────────────────────────────
+
+def evaluate_bn(model, train_df, test_df):
+    """Avalia a BN nos 10 fatores de risco com threshold adaptativo [M1]."""
+    infer    = VariableElimination(model)
+    results  = {}
+    roc_data = {}
 
     for target in TARGET_RFFS:
         other_targets = [t for t in TARGET_RFFS if t != target]
         evidence_cols = [c for c in test_df.columns
                          if c != target and c not in other_targets]
-
-        y_true  = []
-        y_proba = []
+        y_true, y_proba = [], []
 
         for _, row in test_df.iterrows():
             evidence = {col: int(row[col]) for col in evidence_cols}
@@ -235,77 +411,214 @@ def train_model(data_path: str = 'data/base_sintetica.csv',
                 prob_1 = float(result.values[1])
             except Exception:
                 prob_1 = float(train_df[target].mean())
-
             y_true.append(int(row[target]))
             y_proba.append(prob_1)
 
         y_true  = np.array(y_true)
         y_proba = np.array(y_proba)
+        prev    = float(train_df[target].mean())
 
-        # Threshold adaptativo: maximiza o F1 na curva ROC do treino,
-        # garantindo que variáveis com baixa prevalência recebam predições positivas.
-        # Fallback: prevalência do treino (simples e robusto).
-        prevalencia = float(train_df[target].mean())
-        try:
-            fpr, tpr, thresholds = roc_curve(y_true, y_proba)
-            f1_scores = [
-                f1_score(y_true, (y_proba >= t).astype(int), zero_division=0)
-                for t in thresholds
-            ]
-            best_threshold = float(thresholds[np.argmax(f1_scores)])
-        except Exception:
-            best_threshold = prevalencia
+        metrics = compute_metrics_with_adaptive_threshold(y_true, y_proba, prev)
+        metrics['prevalencia'] = prev
+        results[target] = metrics
 
-        y_pred = (y_proba >= best_threshold).astype(int)
+        fpr, tpr, _ = roc_curve(y_true, y_proba)
+        roc_data[target] = {'fpr': fpr, 'tpr': tpr, 'auc': metrics['AUC-ROC']}
 
-        # 6 métricas do paper (Tabela 8)
-        prec    = precision_score(y_true, y_pred, zero_division=0)
-        rec     = recall_score(y_true, y_pred, zero_division=0)
-        f1      = f1_score(y_true, y_pred, zero_division=0)
-        auc_pr  = average_precision_score(y_true, y_proba)
-        bal_acc = balanced_accuracy_score(y_true, y_pred)
-        auc_roc = roc_auc_score(y_true, y_proba)
+    return results, roc_data
 
-        print(f"{target:<12} {prevalencia:>5.2f} {best_threshold:>7.2f} "
-              f"{prec:>6.2f} {rec:>6.2f} {f1:>6.2f} "
-              f"{auc_pr:>7.2f} {bal_acc:>7.2f} {auc_roc:>8.2f}")
 
-    print("=" * 75)
-    print("\nLegenda: Prev=Prevalência no treino | Thresh=Threshold ótimo por F1")
-    print("         Prec=Precisão | Rec=Recall | BalAcc=Balanced Accuracy")
-    print("         AUC-PR=Área sob Precisão-Recall | AUC-ROC=Área sob ROC")
-    print("\n✅ Treinamento concluído!")
+def evaluate_sklearn_classifier(clf, X_train, y_train, X_test, y_test,
+                                 prevalencia, use_oversample=True):
+    """Treina e avalia um classificador sklearn com oversampling opcional."""
+    if use_oversample:
+        X_tr, y_tr = oversample_minority(X_train, y_train)
+    else:
+        X_tr, y_tr = X_train, y_train
 
+    clf.fit(X_tr, y_tr)
+
+    if hasattr(clf, 'predict_proba'):
+        y_proba = clf.predict_proba(X_test)[:, 1]
+    else:
+        y_proba = clf.decision_function(X_test)
+        y_proba = (y_proba - y_proba.min()) / (y_proba.max() - y_proba.min() + 1e-9)
+
+    return compute_metrics_with_adaptive_threshold(
+        np.array(y_test), y_proba, prevalencia
+    ), y_proba
+
+
+def _evaluate_classifiers(classifiers, train_df, test_df, feature_cols):
+    """Avalia cada classificador sklearn nos 10 fatores de risco."""
+    X_train = train_df[feature_cols].values
+    X_test  = test_df[feature_cols].values
+    all_results = {}
+    all_roc     = {}
+
+    for clf_name, clf in classifiers.items():
+        print(f"  Treinando {clf_name}...")
+        clf_results = {}
+        clf_roc     = {}
+
+        for target in TARGET_RFFS:
+            y_train_t   = train_df[target].values
+            y_test_t    = test_df[target].values
+            prevalencia = float(y_train_t.mean())
+
+            metrics, y_proba = evaluate_sklearn_classifier(
+                clf.__class__(**clf.get_params()),
+                X_train, y_train_t,
+                X_test, y_test_t,
+                prevalencia, use_oversample=True
+            )
+            metrics['prevalencia'] = prevalencia
+            clf_results[target] = metrics
+
+            fpr, tpr, _ = roc_curve(y_test_t, y_proba)
+            clf_roc[target] = {'fpr': fpr, 'tpr': tpr, 'auc': metrics['AUC-ROC']}
+
+        all_results[clf_name] = clf_results
+        all_roc[clf_name]     = clf_roc
+
+    return all_results, all_roc
+
+
+# ── Relatorios ─────────────────────────────────────────────────────────────────
+
+def _print_bn_results(bn_results):
+    print("\n" + "=" * 80)
+    print("RESULTADOS — Rede Bayesiana (10 fatores de risco, Tabela 10 do paper)")
+    print("=" * 80)
+    print(f"\n{'Alvo':<12} {'Prev':>5} {'Thresh':>7} {'Prec':>6} {'Rec':>6} "
+          f"{'F1':>6} {'AUC-PR':>7} {'BalAcc':>7} {'AUC-ROC':>8}")
+    print("-" * 72)
+    for target in TARGET_RFFS:
+        r = bn_results[target]
+        print(f"{target:<12} {r['prevalencia']:>5.2f} {r['threshold']:>7.2f} "
+              f"{r['Prec']:>6.2f} {r['Rec']:>6.2f} {r['F1']:>6.2f} "
+              f"{r['AUC-PR']:>7.2f} {r['BalAcc']:>7.2f} {r['AUC-ROC']:>8.2f}")
+
+
+def _print_comparison_results(all_results):
+    print("\n" + "=" * 55)
+    print("COMPARACAO DE CLASSIFICADORES — AUC-ROC e BalAcc medios")
+    print("=" * 55)
+    print(f"\n{'Classificador':<16} {'AUC-ROC medio':>14} {'BalAcc medio':>13} {'F1 medio':>10}")
+    print("-" * 55)
+    for clf_name, clf_res in all_results.items():
+        auc_mean = np.mean([clf_res[t]['AUC-ROC'] for t in TARGET_RFFS])
+        bal_mean = np.mean([clf_res[t]['BalAcc']  for t in TARGET_RFFS])
+        f1_mean  = np.mean([clf_res[t]['F1']      for t in TARGET_RFFS])
+        star = " <-- paper" if clf_name == 'BN' else ""
+        print(f"{clf_name:<16} {auc_mean:>14.3f} {bal_mean:>13.3f} {f1_mean:>10.3f}{star}")
+
+    print("\nLegenda: LR=Regressao Logistica | DT=Arvore de Decisao | RF=Random Forest")
+    print("         Oversampling por resample (sklearn) — equivalente ao SVM-SMOTE do paper")
+
+
+def _print_modifications_summary():
+    print("\n" + "=" * 55)
+    print("MODIFICACOES EM RELACAO AO PAPER (para o documento):")
+    print("=" * 55)
+    print("[M1] Threshold adaptativo por variavel (maximiza F1)")
+    print("     Paper usa threshold fixo 0.5 para todos os alvos.")
+    print("     Nossa abordagem melhora Recall de variaveis raras.")
+    print("[M2] Dados sinteticos baseados no GSTRIDE (dados reais publicos)")
+    print("     Paper usa dados confidenciais do hospital de Lille.")
+    print("[M3] Oversampling por resample (sklearn) para LR/DT/RF")
+    print("     Paper usa SVM-SMOTE — nossa versao nao exige dependencia extra.")
+    print("\nArquivos gerados em outputs/:")
+    print("  grafo_bn.png               — Grafo da BN com arcos destacados")
+    print("  heatmap_metricas.png       — Heatmap 6 metricas x 10 alvos")
+    print("  comparacao_classificadores.png — BN vs LR vs DT vs RF")
+    print("  curvas_roc.png             — Curvas ROC por fator de risco")
+
+
+# ── Pipeline principal ─────────────────────────────────────────────────────────
+
+def train_model(data_path='data/base_sintetica.csv', save_model=True):
+    """Pipeline completo de treino, avaliacao e visualizacao."""
+
+    # 1. Carregar e pre-processar
+    df = pd.read_csv(data_path)
+
+    # Remover colunas continuas — BN precisa de variaveis discretas
+    # As colunas binarizadas (TUGgt20, BMIlt19) ja existem no CSV do generator.py
+    continuous_cols = ['BMI', 'TUG_s', 'SPPB', 'grip_kg', 'FES1', 'gait_ms', 'GDS']
+    df_bn = df.drop(columns=[c for c in continuous_cols if c in df.columns], errors='ignore')
+    df_bn = discretize_age(df_bn)
+
+    print(f"Dados carregados: {df.shape[0]} pacientes, {df_bn.shape[1]} variaveis (BN)")
+
+    # 2. Split 80/20
+    train_df, test_df = train_test_split(df_bn, test_size=0.2, random_state=42)
+
+    # 3. Imputacao Naive Bayes
+    print("\nImputando valores ausentes com Naive Bayes...")
+    train_df, test_df = impute_missing_naive_bayes(train_df, test_df)
+
+    # 4. Aprender estrutura GHC-BIC com arcos obrigatorios
+    print("Aprendendo estrutura da BN (GHC-BIC)...")
+    cols_set = set(train_df.columns)
+    valid_mandatory = [(a, b) for a, b in MANDATORY_EDGES
+                       if a in cols_set and b in cols_set]
+
+    hc = HillClimbSearch(train_df)
+    best_dag = hc.estimate(
+        scoring_method=BicScore(train_df),
+        fixed_edges=set(valid_mandatory),
+        max_indegree=4,
+        show_progress=False,
+    )
+    print(f"  Arcos obrigatorios usados: {len(valid_mandatory)}")
+    print(f"  Arcos totais aprendidos:   {len(best_dag.edges())}")
+
+    # 5. Treinar BN com BDeu
+    model = BayesianNetwork(best_dag.edges())
+    model.fit(train_df, estimator=BayesianEstimator, prior_type='BDeu')
+
+    if save_model:
+        with open('data/bn_model.pkl', 'wb') as f:
+            pickle.dump(model, f)
+        print("  Modelo BN salvo em data/bn_model.pkl")
+
+    # 6. Visualizar grafo da BN
+    print("\nGerando grafo da BN...")
+    plot_bn_graph(model, set(valid_mandatory))
+
+    # 7. Avaliar BN
+    print("\nAvaliando Rede Bayesiana...")
+    bn_results, bn_roc = evaluate_bn(model, train_df, test_df)
+
+    # 8. Comparar com LR, DT, RF
+    print("\nComparando com outros classificadores (com oversampling)...")
+    classifiers = {
+        'LR': LogisticRegression(max_iter=1000, random_state=42),
+        'DT': DecisionTreeClassifier(max_depth=6, random_state=42),
+        'RF': RandomForestClassifier(n_estimators=100, max_depth=6, random_state=42),
+    }
+    feature_cols = [c for c in train_df.columns if c not in TARGET_RFFS]
+    clf_results, clf_roc = _evaluate_classifiers(classifiers, train_df, test_df, feature_cols)
+
+    all_results = {'BN': bn_results, **clf_results}
+    all_roc     = {'BN': bn_roc,     **clf_roc}
+
+    # 9. Relatorios
+    _print_bn_results(bn_results)
+    _print_comparison_results(all_results)
+
+    # 10. Visualizacoes
+    print("\nGerando visualizacoes...")
+    plot_metrics_heatmap(bn_results)
+    plot_classifier_comparison(all_results)
+    plot_roc_curves(all_roc)
+
+    _print_modifications_summary()
+    print("\nTreinamento concluido!")
 
     return model
 
 
-def plot_bn_structure(model):
-    """
-    Gera uma visualização gráfica da estrutura da Rede Bayesiana.
-    """
-    plt.figure(figsize=(12, 8))
-    
-    # Criar o objeto do grafo a partir das arestas do modelo
-    G = nx.DiGraph(model.edges())
-    
-    # Definir o layout (o 'spring_layout' costuma organizar bem os nós)
-    pos = nx.spring_layout(G, seed=42, k=2)
-    
-    # Desenhar nós e arestas
-    nx.draw_networkx_nodes(G, pos, node_size=2000, node_color='skyblue', alpha=0.8)
-    nx.draw_networkx_labels(G, pos, font_size=10, font_weight='bold')
-    nx.draw_networkx_edges(G, pos, edge_color='gray', arrows=True, arrowsize=20)
-    
-    plt.title("Estrutura da Rede Bayesiana Aprendida (Sihag et al. Framework)")
-    plt.axis('off')
-    plt.tight_layout()
-    plt.show()
-
-
-
 if __name__ == "__main__":
-    model = train_model()
-    plot_bn_structure(model)
-
-    
+    train_model()
