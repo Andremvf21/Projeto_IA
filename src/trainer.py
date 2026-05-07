@@ -26,6 +26,7 @@ MODIFICACOES EM RELACAO AO PAPER:
 import os
 import pickle
 import warnings
+from pathlib import Path
 
 # ── Visualizacao ───────────────────────────────────────────────────────────────
 import matplotlib
@@ -39,9 +40,12 @@ import numpy as np
 import pandas as pd
 
 # ── pgmpy ─────────────────────────────────────────────────────────────────────
-from pgmpy.estimators import BayesianEstimator, BicScore, HillClimbSearch
+from pgmpy.estimators import HillClimbSearch
+from pgmpy.estimators.StructureScore import BIC
+from pgmpy.causal_discovery import ExpertKnowledge
 from pgmpy.inference import VariableElimination
-from pgmpy.models import BayesianNetwork
+from pgmpy.models import DiscreteBayesianNetwork
+from pgmpy.parameter_estimator import DiscreteBayesianEstimator
 
 # ── sklearn ────────────────────────────────────────────────────────────────────
 from sklearn.ensemble import RandomForestClassifier
@@ -61,8 +65,14 @@ from sklearn.tree import DecisionTreeClassifier
 from sklearn.utils import resample
 
 warnings.filterwarnings("ignore")
-os.makedirs("data",    exist_ok=True)
-os.makedirs("outputs", exist_ok=True)
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = ROOT_DIR / "data"
+OUTPUT_DIR = ROOT_DIR / "outputs"
+DATA_FILE = DATA_DIR / "base_sintetica.csv"
+
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ── Constantes ─────────────────────────────────────────────────────────────────
 
@@ -225,47 +235,104 @@ def plot_bn_graph(model, mandatory_edges, save_path='outputs/grafo_bn.png'):
         for e in G.edges()
     ]
     edge_widths = [
-        2.5 if e in mandatory_set else 1.0
+        2.8 if e in mandatory_set else 1.4
+        for e in G.edges()
+    ]
+    edge_styles = [
+        'solid' if e in mandatory_set else 'dashed'
         for e in G.edges()
     ]
 
     target_set = set(TARGET_RFFS)
     node_colors = [
-        '#FEE2E2' if n in target_set else '#F1F5F9'
+        '#FEE2E2' if n in target_set else '#F8FAFC'
         for n in G.nodes()
     ]
     node_edge_colors = [
-        '#DC2626' if n in target_set else '#94A3B8'
+        '#B91C1C' if n in target_set else '#475569'
         for n in G.nodes()
     ]
 
-    plt.figure(figsize=(18, 12))
-    pos = nx.spring_layout(G, seed=42, k=2.5)
+    def _circular_shell_layout(graph):
+        target_nodes = [n for n in graph.nodes() if n in target_set]
+        aux_nodes = [n for n in graph.nodes() if n not in target_set]
+        if not target_nodes or not aux_nodes:
+            return nx.circular_layout(graph)
+        return nx.shell_layout(graph, nlist=[sorted(aux_nodes), sorted(target_nodes)])
 
-    nx.draw_networkx_nodes(G, pos, node_color=node_colors,
-                           edgecolors=node_edge_colors,
-                           node_size=1200, linewidths=1.5)
-    nx.draw_networkx_labels(G, pos, font_size=7, font_weight='bold')
-    nx.draw_networkx_edges(G, pos, edge_color=edge_colors,
-                           width=edge_widths, arrows=True,
-                           arrowsize=15, connectionstyle='arc3,rad=0.1')
+    try:
+        pos = _circular_shell_layout(G)
+    except Exception:
+        pos = nx.circular_layout(G)
+
+    plt.figure(figsize=(20, 16))
+    ax = plt.gca()
+    ax.set_aspect('equal')
+
+    nx.draw_networkx_nodes(
+        G, pos,
+        node_color=node_colors,
+        edgecolors=node_edge_colors,
+        node_size=2200,
+        linewidths=2.2,
+    )
+    nx.draw_networkx_labels(
+        G, pos,
+        font_size=10,
+        font_weight='bold',
+        font_color='#0F172A',
+    )
+
+    mandatory_edges = [e for e in G.edges() if e in mandatory_set]
+    learned_edges = [e for e in G.edges() if e not in mandatory_set]
+
+    if mandatory_edges:
+        nx.draw_networkx_edges(
+            G,
+            pos,
+            edgelist=mandatory_edges,
+            edge_color='#2563EB',
+            width=2.8,
+            style='solid',
+            arrows=True,
+            arrowstyle='-|>',
+            arrowsize=20,
+            connectionstyle='arc3,rad=0.18',
+            alpha=0.95,
+        )
+    if learned_edges:
+        nx.draw_networkx_edges(
+            G,
+            pos,
+            edgelist=learned_edges,
+            edge_color='#94A3B8',
+            width=1.4,
+            style='dashed',
+            arrows=True,
+            arrowstyle='-|>',
+            arrowsize=18,
+            connectionstyle='arc3,rad=0.08',
+            alpha=0.8,
+        )
 
     legend_elements = [
-        Patch(facecolor='#FEE2E2', edgecolor='#DC2626', label='Fator de risco (alvo)'),
-        Patch(facecolor='#F1F5F9', edgecolor='#94A3B8', label='Variavel auxiliar'),
-        plt.Line2D([0], [0], color='#2563EB', linewidth=2.5, label='Arco obrigatorio (especialista)'),
-        plt.Line2D([0], [0], color='#94A3B8', linewidth=1.0, label='Arco aprendido (GHC-BIC)'),
+        Patch(facecolor='#FEE2E2', edgecolor='#B91C1C', label='Fator de risco (alvo)'),
+        Patch(facecolor='#F8FAFC', edgecolor='#475569', label='Variavel auxiliar'),
+        plt.Line2D([0], [0], color='#2563EB', linewidth=2.8, label='Arco obrigatorio (especialista)'),
+        plt.Line2D([0], [0], color='#94A3B8', linewidth=1.4, linestyle='dashed', label='Arco aprendido (GHC-BIC)'),
     ]
-    plt.legend(handles=legend_elements, loc='upper left', fontsize=9)
+    plt.legend(handles=legend_elements, loc='upper left', fontsize=10, frameon=True, framealpha=0.95)
     plt.title(
         f'Grafo da Rede Bayesiana — {len(G.nodes())} variaveis, {len(G.edges())} arcos\n'
         f'Arcos obrigatorios: {sum(1 for e in G.edges() if e in mandatory_set)} | '
         f'Aprendidos automaticamente: {sum(1 for e in G.edges() if e not in mandatory_set)}',
-        fontsize=12, pad=15
+        fontsize=15,
+        pad=18,
+        color='#0F172A',
     )
     plt.axis('off')
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.tight_layout(pad=1.2)
+    plt.savefig(save_path, dpi=220, bbox_inches='tight')
     plt.close()
     print(f"  Grafo salvo em {save_path}")
 
@@ -537,10 +604,12 @@ def _print_modifications_summary():
 
 # ── Pipeline principal ─────────────────────────────────────────────────────────
 
-def train_model(data_path='data/base_sintetica.csv', save_model=True):
+def train_model(data_path=None, save_model=True):
     """Pipeline completo de treino, avaliacao e visualizacao."""
 
     # 1. Carregar e pre-processar
+    if data_path is None:
+        data_path = DATA_FILE
     df = pd.read_csv(data_path)
 
     # Remover colunas continuas — BN precisa de variaveis discretas
@@ -566,8 +635,8 @@ def train_model(data_path='data/base_sintetica.csv', save_model=True):
 
     hc = HillClimbSearch(train_df)
     best_dag = hc.estimate(
-        scoring_method=BicScore(train_df),
-        fixed_edges=set(valid_mandatory),
+        scoring_method=BIC(train_df),
+        expert_knowledge=ExpertKnowledge(required_edges=valid_mandatory),
         max_indegree=4,
         show_progress=False,
     )
@@ -575,17 +644,20 @@ def train_model(data_path='data/base_sintetica.csv', save_model=True):
     print(f"  Arcos totais aprendidos:   {len(best_dag.edges())}")
 
     # 5. Treinar BN com BDeu
-    model = BayesianNetwork(best_dag.edges())
-    model.fit(train_df, estimator=BayesianEstimator, prior_type='BDeu')
+    model = DiscreteBayesianNetwork(best_dag.edges())
+    model.fit(
+        train_df,
+        estimator=DiscreteBayesianEstimator(prior_type='BDeu'),
+    )
 
     if save_model:
-        with open('data/bn_model.pkl', 'wb') as f:
+        with open(DATA_DIR / 'bn_model.pkl', 'wb') as f:
             pickle.dump(model, f)
-        print("  Modelo BN salvo em data/bn_model.pkl")
+        print(f"  Modelo BN salvo em {DATA_DIR / 'bn_model.pkl'}")
 
     # 6. Visualizar grafo da BN
     print("\nGerando grafo da BN...")
-    plot_bn_graph(model, set(valid_mandatory))
+    plot_bn_graph(model, set(valid_mandatory), save_path=OUTPUT_DIR / 'grafo_bn.png')
 
     # 7. Avaliar BN
     print("\nAvaliando Rede Bayesiana...")
@@ -610,9 +682,9 @@ def train_model(data_path='data/base_sintetica.csv', save_model=True):
 
     # 10. Visualizacoes
     print("\nGerando visualizacoes...")
-    plot_metrics_heatmap(bn_results)
-    plot_classifier_comparison(all_results)
-    plot_roc_curves(all_roc)
+    plot_metrics_heatmap(bn_results, save_path=OUTPUT_DIR / 'heatmap_metricas.png')
+    plot_classifier_comparison(all_results, save_path=OUTPUT_DIR / 'comparacao_classificadores.png')
+    plot_roc_curves(all_roc, save_path=OUTPUT_DIR / 'curvas_roc.png')
 
     _print_modifications_summary()
     print("\nTreinamento concluido!")
