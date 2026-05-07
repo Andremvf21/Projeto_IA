@@ -230,109 +230,132 @@ def plot_bn_graph(model, mandatory_edges, save_path='outputs/grafo_bn.png'):
     G.add_edges_from(model.edges())
 
     mandatory_set = set(mandatory_edges)
-    edge_colors = [
-        '#2563EB' if e in mandatory_set else '#94A3B8'
-        for e in G.edges()
-    ]
-    edge_widths = [
-        2.8 if e in mandatory_set else 1.4
-        for e in G.edges()
-    ]
-    edge_styles = [
-        'solid' if e in mandatory_set else 'dashed'
-        for e in G.edges()
-    ]
-
+    
     target_set = set(TARGET_RFFS)
     node_colors = [
-        '#FEE2E2' if n in target_set else '#F8FAFC'
+        '#FEE2E2' if n in target_set else '#F0F9FF'
         for n in G.nodes()
     ]
     node_edge_colors = [
-        '#B91C1C' if n in target_set else '#475569'
+        '#991B1B' if n in target_set else '#1E40AF'
         for n in G.nodes()
     ]
 
-    def _circular_shell_layout(graph):
-        target_nodes = [n for n in graph.nodes() if n in target_set]
-        aux_nodes = [n for n in graph.nodes() if n not in target_set]
-        if not target_nodes or not aux_nodes:
-            return nx.circular_layout(graph)
-        return nx.shell_layout(graph, nlist=[sorted(aux_nodes), sorted(target_nodes)])
+    def _circular_layout_with_targets(model, target_set):
+        """Layout circular único com alvos destacados e conexões claras."""
+        G = model
+        
+        # Separar nós por tipo
+        target_nodes = sorted([n for n in G.nodes() if n in target_set])
+        aux_nodes = sorted([n for n in G.nodes() if n not in target_set])
+        
+        # Calcular posições em um círculo perfeito
+        all_nodes = aux_nodes + target_nodes  # auxiliares primeiro, depois alvos
+        n_total = len(all_nodes)
+        
+        pos = {}
+        radius = 4.0
+        
+        for i, node in enumerate(all_nodes):
+            angle = 2 * np.pi * i / n_total
+            pos[node] = (radius * np.cos(angle), radius * np.sin(angle))
+        
+        return pos
 
     try:
-        pos = _circular_shell_layout(G)
+        pos = _circular_layout_with_targets(model, target_set)
     except Exception:
-        pos = nx.circular_layout(G)
+        pos = nx.spring_layout(model, k=3, iterations=100, seed=42)
 
-    plt.figure(figsize=(20, 16))
+    plt.figure(figsize=(24, 18))
     ax = plt.gca()
     ax.set_aspect('equal')
 
+    # Desenhar nós
     nx.draw_networkx_nodes(
         G, pos,
         node_color=node_colors,
         edgecolors=node_edge_colors,
-        node_size=2200,
-        linewidths=2.2,
+        node_size=3200,
+        linewidths=3.0,
+        ax=ax
     )
+    
+    # Desenhar labels dos nós
     nx.draw_networkx_labels(
         G, pos,
-        font_size=10,
+        font_size=12,
         font_weight='bold',
         font_color='#0F172A',
+        ax=ax
     )
 
-    mandatory_edges = [e for e in G.edges() if e in mandatory_set]
+    # Separar arcos obrigatórios e aprendidos
+    mandatory_edges_list = [e for e in G.edges() if e in mandatory_set]
     learned_edges = [e for e in G.edges() if e not in mandatory_set]
 
-    if mandatory_edges:
+    # Desenhar arcos obrigatórios (azuis, sólidos)
+    if mandatory_edges_list:
         nx.draw_networkx_edges(
             G,
             pos,
-            edgelist=mandatory_edges,
+            edgelist=mandatory_edges_list,
             edge_color='#2563EB',
-            width=2.8,
+            width=4.0,
             style='solid',
             arrows=True,
             arrowstyle='-|>',
-            arrowsize=20,
-            connectionstyle='arc3,rad=0.18',
+            arrowsize=30,
+            connectionstyle='arc3,rad=0.12',
             alpha=0.95,
+            ax=ax,
+            node_size=3200
         )
+    
+    # Desenhar arcos aprendidos (laranja acentuado, tracejados)
     if learned_edges:
         nx.draw_networkx_edges(
             G,
             pos,
             edgelist=learned_edges,
-            edge_color='#94A3B8',
-            width=1.4,
+            edge_color='#F97316',
+            width=2.5,
             style='dashed',
             arrows=True,
             arrowstyle='-|>',
-            arrowsize=18,
+            arrowsize=25,
             connectionstyle='arc3,rad=0.08',
-            alpha=0.8,
+            alpha=0.95,
+            ax=ax,
+            node_size=3200
         )
 
+    # Criar legenda
     legend_elements = [
-        Patch(facecolor='#FEE2E2', edgecolor='#B91C1C', label='Fator de risco (alvo)'),
-        Patch(facecolor='#F8FAFC', edgecolor='#475569', label='Variavel auxiliar'),
-        plt.Line2D([0], [0], color='#2563EB', linewidth=2.8, label='Arco obrigatorio (especialista)'),
-        plt.Line2D([0], [0], color='#94A3B8', linewidth=1.4, linestyle='dashed', label='Arco aprendido (GHC-BIC)'),
+        Patch(facecolor='#FEE2E2', edgecolor='#991B1B', linewidth=2.5, 
+              label='Fator de Risco (Alvo da Predição)'),
+        Patch(facecolor='#F0F9FF', edgecolor='#1E40AF', linewidth=2.5, 
+              label='Variável Auxiliar'),
+        plt.Line2D([0], [0], color='#2563EB', linewidth=3.0, 
+                  label='Arco Obrigatório (Conhecimento Especialista)'),
+        plt.Line2D([0], [0], color='#F97316', linewidth=1.8, linestyle='dashed', 
+                  label='Arco Aprendido (GHC-BIC)'),
     ]
-    plt.legend(handles=legend_elements, loc='upper left', fontsize=10, frameon=True, framealpha=0.95)
-    plt.title(
-        f'Grafo da Rede Bayesiana — {len(G.nodes())} variaveis, {len(G.edges())} arcos\n'
-        f'Arcos obrigatorios: {sum(1 for e in G.edges() if e in mandatory_set)} | '
-        f'Aprendidos automaticamente: {sum(1 for e in G.edges() if e not in mandatory_set)}',
-        fontsize=15,
-        pad=18,
-        color='#0F172A',
+    ax.legend(handles=legend_elements, loc='upper left', fontsize=11, 
+             frameon=True, framealpha=0.95, edgecolor='#1F2937')
+    
+    # Título com informações
+    title_text = (
+        f'Estrutura da Rede Bayesiana — Layout Circular\n'
+        f'{len(G.nodes())} Variáveis | {len(G.edges())} Arcos\n'
+        f'Arcos Obrigatórios: {len(mandatory_edges_list)} | '
+        f'Arcos Aprendidos: {len(learned_edges)}'
     )
-    plt.axis('off')
-    plt.tight_layout(pad=1.2)
-    plt.savefig(save_path, dpi=220, bbox_inches='tight')
+    ax.set_title(title_text, fontsize=18, fontweight='bold', pad=25, color='#0F172A')
+    
+    ax.axis('off')
+    plt.tight_layout(pad=1.0)
+    plt.savefig(save_path, dpi=220, bbox_inches='tight', facecolor='white', edgecolor='none')
     plt.close()
     print(f"  Grafo salvo em {save_path}")
 
@@ -346,27 +369,49 @@ def plot_metrics_heatmap(results_bn, save_path='outputs/heatmap_metricas.png'):
     metrics = METRIC_NAMES
     data    = np.array([[results_bn[t][m] for m in metrics] for t in targets])
 
-    fig, ax = plt.subplots(figsize=(11, 7))
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    # Usar colormap 'RdYlGn' para melhor contraste
     im = ax.imshow(data, cmap='RdYlGn', vmin=0, vmax=1, aspect='auto')
 
+    # Configurar eixos com fonte maior
     ax.set_xticks(range(len(metrics)))
-    ax.set_xticklabels(metrics, fontsize=11, fontweight='bold')
+    ax.set_xticklabels(metrics, fontsize=12, fontweight='bold')
     ax.set_yticks(range(len(targets)))
-    ax.set_yticklabels(targets, fontsize=10)
+    ax.set_yticklabels(targets, fontsize=11, fontweight='bold')
 
+    # Adicionar valores nas células com contraste automático
     for i in range(len(targets)):
         for j in range(len(metrics)):
             val = data[i, j]
-            color = 'white' if val < 0.35 or val > 0.75 else 'black'
-            ax.text(j, i, f'{val:.2f}', ha='center', va='center',
-                    fontsize=9, color=color, fontweight='bold')
+            # Escolher cor do texto baseado na intensidade
+            if val < 0.3 or val > 0.75:
+                text_color = 'white'
+                weight = 'bold'
+            else:
+                text_color = 'black'
+                weight = 'bold'
+            
+            ax.text(j, i, f'{val:.3f}', ha='center', va='center',
+                    fontsize=10, color=text_color, fontweight=weight)
 
-    ax.set_title('Performance da Rede Bayesiana — 6 Metricas x 10 Fatores de Risco\n'
-                 '(Verde = melhor | Vermelho = pior)',
-                 fontsize=12, pad=12)
-    plt.colorbar(im, ax=ax, label='Score (0–1)')
+    # Adicionar linhas de separação entre células
+    for i in range(len(targets) + 1):
+        ax.axhline(i - 0.5, color='white', linewidth=0.5)
+    for j in range(len(metrics) + 1):
+        ax.axvline(j - 0.5, color='white', linewidth=0.5)
+
+    # Título e legenda
+    ax.set_title('Performance da Rede Bayesiana\n6 Métricas × 10 Fatores de Risco\n'
+                 '(Verde = Excelente | Amarelo = Aceitável | Vermelho = Precisa Melhorar)',
+                 fontsize=13, fontweight='bold', pad=15)
+    
+    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label('Score (0–1)', fontsize=11, fontweight='bold')
+    cbar.ax.tick_params(labelsize=10)
+    
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.savefig(save_path, dpi=200, bbox_inches='tight')
     plt.close()
     print(f"  Heatmap salvo em {save_path}")
 
@@ -381,7 +426,7 @@ def plot_classifier_comparison(results_all, save_path='outputs/comparacao_classi
     x     = np.arange(len(classifiers))
     width = 0.25
 
-    fig, axes = plt.subplots(1, len(metrics_to_plot), figsize=(14, 5), sharey=False)
+    fig, axes = plt.subplots(1, len(metrics_to_plot), figsize=(16, 6), sharey=False)
 
     for idx, metric in enumerate(metrics_to_plot):
         ax     = axes[idx]
@@ -394,29 +439,40 @@ def plot_classifier_comparison(results_all, save_path='outputs/comparacao_classi
             stds.append(np.std(vals))
             colors_bar.append(COLORS.get(clf, '#6B7280'))
 
-        bars = ax.bar(x, means, yerr=stds, capsize=5,
-                      color=colors_bar, edgecolor='white',
-                      linewidth=0.8, width=0.55, alpha=0.88)
-
+        bars = ax.bar(x, means, yerr=stds, capsize=8,
+                      color=colors_bar, edgecolor='#1F2937',
+                      linewidth=1.5, width=0.6, alpha=0.85, 
+                      error_kw={'linewidth': 2, 'ecolor': '#4B5563'})
+        
         ax.set_xticks(x)
-        ax.set_xticklabels(classifiers, fontsize=11, fontweight='bold')
-        ax.set_ylim(0, 1.05)
-        ax.set_ylabel(metric, fontsize=11)
-        ax.set_title(f'{metric} medio (10 alvos)', fontsize=11)
-        ax.axhline(0.5, color='gray', linestyle='--', linewidth=0.8, alpha=0.6)
-        ax.grid(axis='y', alpha=0.3)
+        ax.set_xticklabels(classifiers, fontsize=12, fontweight='bold')
+        ax.set_ylim(0, 1.1)
+        ax.set_ylabel(metric, fontsize=12, fontweight='bold')
+        ax.set_title(f'{metric} Médio\n(sobre 10 fatores de risco)', 
+                     fontsize=12, fontweight='bold', pad=12)
+        ax.axhline(0.5, color='#DC2626', linestyle='--', linewidth=1.2, alpha=0.5, label='Baseline (50%)')
+        ax.grid(axis='y', alpha=0.4, linestyle='--', linewidth=0.8)
+        ax.set_axisbelow(True)
 
-        for bar, mean in zip(bars, means):
-            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
-                    f'{mean:.2f}', ha='center', va='bottom', fontsize=9, fontweight='bold')
+        # Adicionar valores das barras
+        for bar, mean, std in zip(bars, means, stds):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2, height + std + 0.03,
+                    f'{mean:.3f}±{std:.3f}', ha='center', va='bottom', 
+                    fontsize=10, fontweight='bold')
+        
+        # Adicionar legenda só no primeiro subplot
+        if idx == 0:
+            ax.legend(fontsize=10, loc='upper left', framealpha=0.9)
 
     fig.suptitle(
-        'Comparacao de Classificadores — Media sobre os 10 Fatores de Risco\n'
-        '(BN com oversampling via resample; LR/DT/RF com oversampling da classe minoritaria)',
-        fontsize=11
+        'Comparação de Classificadores — Médias sobre 10 Fatores de Risco\n'
+        'BN = Rede Bayesiana | LR = Regressão Logística | DT = Árvore de Decisão | RF = Random Forest\n'
+        '(Todos com oversampling da classe minoritária)',
+        fontsize=12, fontweight='bold', y=0.98
     )
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    plt.savefig(save_path, dpi=200, bbox_inches='tight')
     plt.close()
     print(f"  Comparacao salva em {save_path}")
 
@@ -425,34 +481,41 @@ def plot_roc_curves(results_roc, save_path='outputs/curvas_roc.png'):
     """Curvas ROC para cada fator de risco — todos os classificadores."""
     n    = len(TARGET_RFFS)
     cols = 5
-    rows = (n + cols - 1) // cols
-    fig, axes = plt.subplots(rows, cols, figsize=(18, 7))
+    rows = 2
+    fig, axes = plt.subplots(rows, cols, figsize=(20, 10))
     axes = axes.flatten()
 
     for idx, target in enumerate(TARGET_RFFS):
         ax = axes[idx]
+        
         for clf_name, clf_results in results_roc.items():
             if target in clf_results:
                 fpr = clf_results[target]['fpr']
                 tpr = clf_results[target]['tpr']
                 auc = clf_results[target]['auc']
-                ax.plot(fpr, tpr, label=f"{clf_name} ({auc:.2f})",
-                        color=COLORS.get(clf_name, '#6B7280'), linewidth=1.5)
-        ax.plot([0, 1], [0, 1], 'k--', linewidth=0.8, alpha=0.5)
-        ax.set_title(target, fontsize=9, fontweight='bold')
-        ax.set_xlabel('FPR', fontsize=8)
-        ax.set_ylabel('TPR', fontsize=8)
-        ax.tick_params(labelsize=7)
-        ax.legend(fontsize=6, loc='lower right')
-        ax.grid(alpha=0.3)
+                linewidth = 2.5 if clf_name == 'BN' else 2.0
+                alpha_val = 1.0 if clf_name == 'BN' else 0.8
+                ax.plot(fpr, tpr, label=f"{clf_name} (AUC={auc:.3f})",
+                        color=COLORS.get(clf_name, '#6B7280'), 
+                        linewidth=linewidth, alpha=alpha_val)
+        
+        ax.plot([0, 1], [0, 1], 'k--', linewidth=1.2, alpha=0.4, label='Chance aleatoria')
+        ax.fill_between([0, 1], [0, 1], alpha=0.05, color='gray')
+        ax.set_title(f'{target} (Fator de Risco)', fontsize=11, fontweight='bold', pad=8)
+        ax.set_xlabel('Taxa de Falsos Positivos (FPR)', fontsize=10)
+        ax.set_ylabel('Taxa de Verdadeiros Positivos (TPR)', fontsize=10)
+        ax.set_xlim(-0.02, 1.02)
+        ax.set_ylim(-0.02, 1.02)
+        ax.tick_params(labelsize=9)
+        ax.legend(fontsize=9, loc='lower right', framealpha=0.95)
+        ax.grid(True, alpha=0.3, linestyle='--')
+        ax.set_aspect('equal')
 
-    for idx in range(n, len(axes)):
-        axes[idx].set_visible(False)
-
-    fig.suptitle('Curvas ROC por Fator de Risco — BN vs Outros Classificadores',
-                 fontsize=12)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    fig.suptitle('Curvas ROC por Fator de Risco — Comparação entre Classificadores\n'
+                 'BN (linha mais espessa) = Rede Bayesiana | LR = Regressão Logística | DT = Árvore de Decisão | RF = Random Forest',
+                 fontsize=13, fontweight='bold', y=0.995)
+    plt.tight_layout(rect=[0, 0, 1, 0.98])
+    plt.savefig(save_path, dpi=200, bbox_inches='tight')
     plt.close()
     print(f"  Curvas ROC salvas em {save_path}")
 
