@@ -20,6 +20,13 @@ MODIFICACOES EM RELACAO AO PAPER:
        O paper usa dados confidenciais do hospital de Lille.
   [M3] Oversampling por resample (sklearn) para classificadores comparados
        Reproduz o efeito do SVM-SMOTE do paper sem dependencia externa.
+  [M4] Inferencia via Markov Blanket em vez de todas as variaveis
+       CORRECAO alinhada com secao 4.2.1 do artigo: "X is independent of
+       the rest of the nodes given MB(X)". Passar todas as 20 variaveis
+       como evidencia com dados escassos causa combinacoes nunca vistas
+       no treino, resultando em y_proba constante (AUC-ROC = 0.5).
+       A correcao usa apenas as variaveis do MB de cada alvo — pais,
+       filhos e co-pais — exatamente como o artigo define.
 """
 
 # ── Stdlib ─────────────────────────────────────────────────────────────────────
@@ -523,24 +530,61 @@ def plot_roc_curves(results_roc, save_path='outputs/curvas_roc.png'):
 # ── Avaliacao de modelos ───────────────────────────────────────────────────────
 
 def evaluate_bn(model, train_df, test_df):
-    """Avalia a BN nos 10 fatores de risco com threshold adaptativo [M1]."""
+    """
+    Avalia a BN nos 10 fatores de risco com threshold adaptativo [M1].
+
+    CORRECAO (alinhada com secao 4.2.1 do artigo — Markov Blanket):
+    O artigo define que X e independente do resto dado seu Markov Blanket
+    (pais + filhos + co-pais). Passar TODAS as variaveis como evidencia
+    causa falha na inferencia quando combinacoes nao foram vistas no treino,
+    resultando em y_proba constante e AUC-ROC = 0.5. A correcao e usar
+    apenas as variaveis do Markov Blanket de cada alvo como evidencia,
+    exatamente como o artigo propoe na secao 4.2.1.
+    """
     infer    = VariableElimination(model)
     results  = {}
     roc_data = {}
 
     for target in TARGET_RFFS:
-        other_targets = [t for t in TARGET_RFFS if t != target]
-        evidence_cols = [c for c in test_df.columns
-                         if c != target and c not in other_targets]
+        # Markov Blanket do alvo: pais + filhos + co-pais (secao 4.2.1)
+        try:
+            mb = model.get_markov_blanket(target)
+        except Exception:
+            mb = set()
+
+        # Usa MB intersectado com colunas disponiveis, excluindo outros alvos
+        other_targets = set(TARGET_RFFS) - {target}
+        mb_available = [
+            c for c in mb
+            if c in test_df.columns and c not in other_targets
+        ]
+
+        # Fallback: se MB vazio, usa features auxiliares do modelo
+        if len(mb_available) < 2:
+            mb_available = [
+                c for c in test_df.columns
+                if c != target and c not in other_targets
+                and c in model.nodes()
+            ]
+
         y_true, y_proba = [], []
 
         for _, row in test_df.iterrows():
-            evidence = {col: int(row[col]) for col in evidence_cols}
+            evidence = {
+                col: int(row[col])
+                for col in mb_available
+                if not pd.isna(row[col])
+            }
             try:
-                result = infer.query([target], evidence=evidence, show_progress=False)
+                result = infer.query(
+                    [target],
+                    evidence=evidence,
+                    show_progress=False
+                )
                 prob_1 = float(result.values[1])
             except Exception:
                 prob_1 = float(train_df[target].mean())
+
             y_true.append(int(row[target]))
             y_proba.append(prob_1)
 
@@ -550,10 +594,16 @@ def evaluate_bn(model, train_df, test_df):
 
         metrics = compute_metrics_with_adaptive_threshold(y_true, y_proba, prev)
         metrics['prevalencia'] = prev
+        metrics['mb_size'] = len(mb_available)
         results[target] = metrics
 
         fpr, tpr, _ = roc_curve(y_true, y_proba)
         roc_data[target] = {'fpr': fpr, 'tpr': tpr, 'auc': metrics['AUC-ROC']}
+
+        print(f"  {target:<12}: MB={len(mb_available)} vars | "
+              f"AUC-ROC={metrics['AUC-ROC']:.3f} | "
+              f"BalAcc={metrics['BalAcc']:.3f} | "
+              f"thresh={metrics['threshold']:.2f}")
 
     return results, roc_data
 
@@ -617,15 +667,17 @@ def _evaluate_classifiers(classifiers, train_df, test_df, feature_cols):
 # ── Relatorios ─────────────────────────────────────────────────────────────────
 
 def _print_bn_results(bn_results):
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 90)
     print("RESULTADOS — Rede Bayesiana (10 fatores de risco, Tabela 10 do paper)")
-    print("=" * 80)
-    print(f"\n{'Alvo':<12} {'Prev':>5} {'Thresh':>7} {'Prec':>6} {'Rec':>6} "
+    print("Inferencia via Markov Blanket — correcao alinhada com secao 4.2.1 do artigo")
+    print("=" * 90)
+    print(f"\n{'Alvo':<12} {'Prev':>5} {'MB':>4} {'Thresh':>7} {'Prec':>6} {'Rec':>6} "
           f"{'F1':>6} {'AUC-PR':>7} {'BalAcc':>7} {'AUC-ROC':>8}")
-    print("-" * 72)
+    print("-" * 78)
     for target in TARGET_RFFS:
         r = bn_results[target]
-        print(f"{target:<12} {r['prevalencia']:>5.2f} {r['threshold']:>7.2f} "
+        mb = r.get('mb_size', '?')
+        print(f"{target:<12} {r['prevalencia']:>5.2f} {mb:>4} {r['threshold']:>7.2f} "
               f"{r['Prec']:>6.2f} {r['Rec']:>6.2f} {r['F1']:>6.2f} "
               f"{r['AUC-PR']:>7.2f} {r['BalAcc']:>7.2f} {r['AUC-ROC']:>8.2f}")
 
@@ -658,6 +710,10 @@ def _print_modifications_summary():
     print("     Paper usa dados confidenciais do hospital de Lille.")
     print("[M3] Oversampling por resample (sklearn) para LR/DT/RF")
     print("     Paper usa SVM-SMOTE — nossa versao nao exige dependencia extra.")
+    print("[M4] Inferencia via Markov Blanket (correcao — secao 4.2.1 do artigo)")
+    print("     Paper: X independente do resto dado MB(X). Correcao necessaria")
+    print("     pois com dados escassos (20 features), todas as evidencias causam")
+    print("     combinacoes nunca vistas no treino -> y_proba constante -> AUC=0.5")
     print("\nArquivos gerados em outputs/:")
     print("  grafo_bn.png               — Grafo da BN com arcos destacados")
     print("  heatmap_metricas.png       — Heatmap 6 metricas x 10 alvos")
